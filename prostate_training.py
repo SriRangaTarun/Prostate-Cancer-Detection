@@ -1,4 +1,8 @@
+# Use BF16 with PyTorch XLA
+
 !export XLA_USE_BF16=1
+
+# Import necessary libraries
 
 import os
 import gc
@@ -33,8 +37,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torchvision.models import resnet18, densenet121, mobilenet_v2
 from albumentations import RandomRotate90, Flip, Compose, Normalize, RandomResizedCrop
 
-np.random.seed(42)
-torch.manual_seed(42)
+# Define hyperparameters and paths
 
 FOLDS = 8
 EPOCHS = 4
@@ -64,6 +67,11 @@ TRAIN_IMG_PATH = args.TRAIN_IMG_PATH
 TRAIN_DATA_PATH = args.TRAIN_DATA_PATH
 SAMPLE_SUB_PATH = args.SAMPLE_SUB_PATH
 
+# Load data and set random seeds
+
+np.random.seed(42)
+torch.manual_seed(42)
+
 test_df = pd.read_csv(TEST_DATA_PATH)
 train_df = pd.read_csv(TRAIN_DATA_PATH)
 sample_submission = pd.read_csv(SAMPLE_SUB_PATH)
@@ -75,6 +83,8 @@ def process_gleason(gleason):
     return [gleason_replace_dict[int(g)] for g in gs]
 
 train_df.gleason_score = train_df.gleason_score.apply(process_gleason)
+
+# Define PyTorch dataset to input data to ResNet-18
 
 class PANDADataset(Dataset):
     def __init__(self, data, img_path, is_val=False, is_train=False):
@@ -123,7 +133,9 @@ class PANDADataset(Dataset):
             return FloatTensor(image), FloatTensor(target)
         else:
             return FloatTensor(image)
-          
+
+# Define a ResNet-18 model with a triple dense head for multitask learning
+
 class ResNetDetector(nn.Module):
     def __init__(self):
         super(ResNetDetector, self).__init__()
@@ -146,7 +158,9 @@ class ResNetDetector(nn.Module):
         gleason_prob_0 = self.softmax(gleason_logit_0)
         gleason_prob_1 = self.softmax(gleason_logit_1)
         return torch.cat([isup_prob, gleason_prob_0, gleason_prob_1], axis=1)
-      
+
+# Split the training data into 8 folds for KFold validation
+
 val_sets, train_sets = [], []
 val_splits = np.int32((np.arange(FOLDS + 1)/FOLDS) * len(train_df))
 val_indices = [[val_splits[i], val_splits[i+1]] for i in range(FOLDS)]
@@ -156,6 +170,8 @@ for fold in tqdm(range(FOLDS)):
     if fold == FOLDS - 1: val_idx[1] -= 1
     val_sets.append(train_df[val_idx[0]:val_idx[1]])
     train_sets.append(pd.concat([train_df[:val_idx[0]], train_df[val_idx[1]:]]))
+    
+# Define cross entropy and accuracy (for backpropagation and evaluation)
 
 def cel(inp, targ):
     _, labels = targ.max(dim=1)
@@ -165,6 +181,8 @@ def acc(inp, targ):
     inp_idx = inp.max(axis=1).indices
     targ_idx = targ.max(axis=1).indices
     return (inp_idx == targ_idx).float().sum(axis=0)/len(inp_idx)
+
+# Define custom PANDA loss for multitask model (combining CEL for all three targets)
   
 def panda_cel(inp, targ):
     isup_loss = cel(inp[:, :6], targ[:, :6])
@@ -178,6 +196,8 @@ def panda_acc(inp, targ):
     gleason_accuracy_0 = acc(inp[:, 6:11], targ[:, 6:11])
     gleason_accuracy_1 = acc(inp[:, 11:16], targ[:, 11:16])
     return [isup_accuracy, gleason_accuracy_0, gleason_accuracy_1]
+
+# Define helper function for training logs (to check training status)
   
 def print_metric(data, fold, start, end, metric, typ):
     r = Fore.RESET
@@ -196,6 +216,8 @@ def print_metric(data, fold, start, end, metric, typ):
         string = string + "{} {} {}: {}{}{}".format(*t) + "  "
         
     print(string + time)
+    
+# Train model on all 8 TPU cores in parallel (one fold per core)
     
 def train(fold):
     val = val_sets[fold]
